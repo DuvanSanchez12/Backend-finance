@@ -38,30 +38,41 @@ app.use('/api/stocks', stockRoutes);
 // --- LÓGICA DE WEBSOCKETS (FINNHUB RELAY) ---
 const finnhubWs = new WebSocket(`wss://ws.finnhub.io?token=${process.env.FINNHUB_API_KEY}`);
 
-finnhubWs.on('open', () => {
-  // Suscríbete a los símbolos que necesitas para tu canal "Código Lógico"
-  const symbols = [
-  "BINANCE:BTCUSDT", 
-  "BINANCE:ETHUSDT", 
-  "BINANCE:BNBUSDC", 
-  "BINANCE:XRPUSDT", 
-  "BINANCE:ADAUSDT"
-];
-  symbols.forEach(s => {
-    finnhubWs.send(JSON.stringify({ type: 'subscribe', symbol: s }));
-  });
+finnhubWs.on('open', async () => {
+  try {
+    // 1. Buscamos todas las monedas que tienes registradas en tu DB
+    const assets = await Asset.find({});
+    
+    if (assets.length === 0) {
+      console.log("⚠️ No hay símbolos en la DB para suscribirse.");
+      return;
+    }
+
+    // 2. Nos suscribimos dinámicamente a cada una
+    assets.forEach(asset => {
+      // Usamos el símbolo original (ej: BINANCE:BTCUSDT)
+      finnhubWs.send(JSON.stringify({ type: 'subscribe', symbol: asset.symbol }));
+    });
+    
+    console.log(`✅ Suscrito exitosamente a ${assets.length} activos.`);
+  } catch (error) {
+    console.error("❌ Error en la suscripción dinámica:", error);
+  }
 });
 
 io.on('connection', async (socket) => {
   try {
-    // Buscamos los precios base en Atlas
     const savedAssets = await Asset.find();
     
-    // Si tienes datos, se los enviamos al frontend
-    if (savedAssets.length > 0) {
-      socket.emit('initial-prices', savedAssets);
+    // Mapeamos los assets para asegurar que el símbolo esté "limpio" (ej: BTCUSDT)
+    const cleanAssets = savedAssets.map(asset => ({
+      ...asset._doc,
+      symbol: asset.symbol.includes(':') ? asset.symbol.split(':')[1] : asset.symbol
+    }));
+
+    if (cleanAssets.length > 0) {
+      socket.emit('initial-prices', cleanAssets);
     }
-    console.log(`👤 Cliente conectado: ${socket.id}`);
   } catch (error) {
     console.error("❌ Error al obtener assets de MongoDB:", error);
   }
