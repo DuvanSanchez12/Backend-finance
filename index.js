@@ -18,14 +18,14 @@ const httpServer = createServer(app); // Creamos el servidor HTTP
 // Configuración de Socket.io para el Frontend
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000",
     credentials: true
   }
 });
 
 // Middlewares
 app.use(cors({
-  origin: "http://localhost:3000",
+  origin: process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000",
   credentials: true
 }));
 app.use(express.json());
