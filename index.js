@@ -9,7 +9,7 @@ import authRoutes from './routes/auth.routes.js';
 import stockRoutes from './routes/stock.routes.js';
 import Asset from './models/Asset.js';
 import History from './models/History.js';
-
+import cron from 'node-cron';
 dotenv.config();
 
 const app = express();
@@ -37,6 +37,56 @@ app.use('/api/stocks', stockRoutes);
 
 // --- LÓGICA DE WEBSOCKETS (FINNHUB RELAY) ---
 const finnhubWs = new WebSocket(`wss://ws.finnhub.io?token=${process.env.FINNHUB_API_KEY}`);
+
+cron.schedule('0 0 * * *', async () => {
+  console.log("🕛 Media noche UTC: Actualizando precios de apertura...");
+  
+  try {
+    const assets = await Asset.find();
+    
+    for (const asset of assets) {
+      // 1. Buscamos el último precio guardado en nuestro historial
+      const lastPrice = await History.findOne({ symbol: asset.symbol })
+                                     .sort({ timestamp: -1 });
+
+      if (lastPrice) {
+        // 2. Este precio de 'cierre' de ayer es la 'apertura' de hoy
+        asset.openPrice = lastPrice.price;
+        asset.lastUpdated = new Date();
+        await asset.save();
+      }
+    }
+    
+    // 3. Avisamos a todos los usuarios conectados que el % cambió
+    const updatedAssets = await Asset.find();
+    io.emit('initial-prices', updatedAssets);
+    
+    console.log("✅ Precios de apertura sincronizados para el nuevo día.");
+  } catch (err) {
+    console.error("❌ Fallo al actualizar precios diarios:", err);
+  }
+}, {
+  timezone: "UTC"
+});
+
+cron.schedule('30 9 * * 1-5', async () => {
+  console.log("🔔 Apertura de Wall Street: Reseteando precios de Acciones...");
+  try {
+    const stocks = await Asset.find({ type: 'stock' });
+    for (const stock of stocks) {
+      const lastTrade = await History.findOne({ symbol: stock.symbol })
+                                     .sort({ timestamp: -1 });
+      if (lastTrade) {
+        stock.openPrice = lastTrade.price;
+        await stock.save();
+      }
+    }
+    const updatedAssets = await Asset.find();
+    io.emit('initial-prices', updatedAssets);
+  } catch (err) {
+    console.error("❌ Error en cron de Acciones:", err);
+  }
+}, { timezone: "America/New_York" });
 
 finnhubWs.on('open', async () => {
   try {
