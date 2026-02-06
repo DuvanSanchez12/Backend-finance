@@ -53,90 +53,74 @@ app.get("/api/health", (req, res) => {
 
 // --- LÓGICA DE WEBSOCKETS CON RECONEXIÓN (FINNHUB) ---
 let finnhubWs;
-const lastSavedPrices = {}; // Control de persistencia (5 min)
+const lastSavedPrices = {};
+let retryDelay = 5000;
 
 function connectFinnhub() {
-  let retryDelay = 5000; // Empezamos con 5 segundos
+  console.log("🔄 Intentando conectar a Finnhub...");
+  
+  // Inicializamos la instancia
+  finnhubWs = new WebSocket(`wss://ws.finnhub.io?token=${process.env.FINNHUB_API_KEY}`);
 
-  function connectFinnhub() {
-    finnhubWs = new WebSocket(
-      `wss://ws.finnhub.io?token=${process.env.FINNHUB_API_KEY}`,
-    );
-
-    finnhubWs.on("open", () => {
-      console.log("🔌 Conectado a Finnhub");
-      retryDelay = 5000; // Resetear el delay si la conexión es exitosa
-      // ... resto de tu lógica de suscripción
-    });
-
-    finnhubWs.on("error", (err) => {
-      if (err.message.includes("429")) {
-        console.error(
-          "⚠️ Límite de Finnhub alcanzado (429). Esperando más tiempo para reintentar...",
-        );
-        retryDelay = Math.min(retryDelay * 2, 60000); // Duplicar espera hasta un máximo de 1 minuto
-      } else {
-        console.error("❌ Error en WebSocket:", err.message);
-      }
-    });
-
-    finnhubWs.on("close", () => {
-      console.log(
-        `⚠️ Conexión perdida. Reintentando en ${retryDelay / 1000}s...`,
-      );
-      setTimeout(connectFinnhub, retryDelay);
-    });
-  }
-
-  finnhubWs.on("message", async (data) => {
-    const message = JSON.parse(data);
-
-    if (message.type === "trade") {
-      const trades = message.data;
-
-      // Enviamos datos en tiempo real al frontend
-      io.emit("market-data", trades);
-
-      // --- LÓGICA DE PERSISTENCIA (Cada 5 minutos) ---
-      for (const trade of trades) {
-        const symbol = trade.s.includes(":") ? trade.s.split(":")[1] : trade.s;
-        const now = Date.now();
-
-        if (
-          !lastSavedPrices[symbol] ||
-          now - lastSavedPrices[symbol] > 300000
-        ) {
-          try {
-            await History.create({
-              symbol: symbol,
-              price: trade.p,
-              timestamp: new Date(now),
-            });
-            lastSavedPrices[symbol] = now;
-            console.log(
-              `💾 Historial persistido para ${symbol} a las ${new Date(now).toLocaleTimeString()}`,
-            );
-          } catch (err) {
-            console.error(`❌ Error guardando historial para ${symbol}:`, err);
-          }
-        }
-      }
+  // IMPORTANTE: Los eventos deben ir pegados a la instancia recién creada
+  finnhubWs.on('open', async () => {
+    console.log("🔌 Conectado a Finnhub WebSocket");
+    retryDelay = 5000; // Resetear delay al conectar con éxito
+    
+    try {
+      const assets = await Asset.find({});
+      assets.forEach(asset => {
+        finnhubWs.send(JSON.stringify({ type: 'subscribe', symbol: asset.symbol }));
+      });
+      console.log(`✅ Suscrito a ${assets.length} activos.`);
+    } catch (error) {
+      console.error("❌ Error en suscripción:", error);
     }
   });
 
-  finnhubWs.on("error", (err) => {
-    console.error("❌ Error en WebSocket de Finnhub:", err.message);
+  finnhubWs.on('message', async (data) => {
+    try {
+      const message = JSON.parse(data);
+      if (message.type === 'trade') {
+        const trades = message.data;
+        io.emit('market-data', trades);
+
+        for (const trade of trades) {
+          const symbol = trade.s.includes(':') ? trade.s.split(':')[1] : trade.s;
+          const now = Date.now();
+
+          if (!lastSavedPrices[symbol] || now - lastSavedPrices[symbol] > 300000) {
+            await History.create({
+              symbol: symbol,
+              price: trade.p,
+              timestamp: new Date(now)
+            });
+            lastSavedPrices[symbol] = now;
+            console.log(`💾 Historial persistido: ${symbol}`);
+          }
+        }
+      } else if (message.type === 'error') {
+        console.error("⚠️ Error de Finnhub:", message.msg);
+      }
+    } catch (err) {
+      console.error("❌ Error procesando mensaje:", err);
+    }
   });
 
-  finnhubWs.on("close", () => {
-    console.log(
-      "⚠️ Conexión con Finnhub perdida. Reintentando en 5 segundos...",
-    );
-    setTimeout(connectFinnhub, 5000); // Intento de reconexión
+  finnhubWs.on('error', (err) => {
+    console.error("❌ Error en WebSocket:", err.message);
+    if (err.message.includes('429')) {
+        retryDelay = Math.min(retryDelay * 2, 60000); 
+    }
+  });
+
+  finnhubWs.on('close', () => {
+    console.log(`⚠️ Conexión cerrada. Reintentando en ${retryDelay / 1000}s...`);
+    setTimeout(connectFinnhub, retryDelay);
   });
 }
 
-// Iniciar conexión Finnhub
+// Iniciar conexión
 connectFinnhub();
 
 // --- SOCKET.IO (CLIENTES FRONTEND) ---
