@@ -148,17 +148,13 @@ io.on("connection", async (socket) => {
     const savedAssets = await Asset.find();
     
     // 2. Mapeamos los datos para enviarlos limpios al frontend
-    const cleanAssets = savedAssets.map((asset) => ({
-      // Extraemos todas las propiedades del documento de Mongo
-      ...asset._doc, 
-      // Limpiamos el símbolo (BINANCE:BTCUSDT -> BTCUSDT) para que coincida con el hook
-      symbol: asset.symbol.includes(":")
-        ? asset.symbol.split(":")[1]
-        : asset.symbol,
-      // Aseguramos que el openPrice vaya en el primer nivel del objeto
-      openPrice: asset.openPrice,
-      name: asset.name
-    }));
+    // En tu server.js, dentro de io.on("connection"...)
+const cleanAssets = savedAssets.map((asset) => ({
+  symbol: asset.symbol.includes(":") ? asset.symbol.split(":")[1] : asset.symbol,
+  name: asset.name,
+  // Forzamos que sea un número para evitar errores en el frontend
+  openPrice: Number(asset.openPrice) || 0 
+}));
 
     // 3. Emitimos solo a este socket recién conectado
     if (cleanAssets.length > 0) {
