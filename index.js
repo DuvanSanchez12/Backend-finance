@@ -140,7 +140,23 @@ cron.schedule("0 0 * * *", async () => {
     console.error("❌ Error en sincronización diaria:", err);
   }
 }, { timezone: "UTC" });
+io.on("connection", async (socket) => {
+  try {
+    const savedAssets = await Asset.find();
+    const cleanAssets = savedAssets.map((asset) => ({
+      ...asset._doc,
+      symbol: asset.symbol.includes(":")
+        ? asset.symbol.split(":")[1]
+        : asset.symbol,
+    }));
 
+    if (cleanAssets.length > 0) {
+      socket.emit("initial-prices", cleanAssets);
+    }
+  } catch (error) {
+    console.error("❌ Error al enviar precios iniciales:", error);
+  }
+});
 // --- CONEXIÓN Y ARRANQUE ---
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log("🚀 Backend conectado a MongoDB Atlas"))
