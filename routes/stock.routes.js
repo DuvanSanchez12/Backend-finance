@@ -1,6 +1,6 @@
 import express from 'express';
 import { getStockQuote } from '../controllers/stock.controller.js';
-import { buyStock, getPortfolio } from '../controllers/portfolio.controller.js';
+import { buyStock, getPortfolio, getHistory } from '../controllers/portfolio.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
