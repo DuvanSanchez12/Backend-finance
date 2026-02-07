@@ -16,7 +16,7 @@ dotenv.config();
 const app = express();
 const httpServer = createServer(app);
 
-// --- CONFIGURACIÓN DE SEGURIDAD (CORS) ---
+// --- CONFIGURACIÓN DE SEGURIDAD ---
 const ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "https://finance-next-js-websockets.vercel.app",
@@ -30,183 +30,123 @@ const io = new Server(httpServer, {
   },
 });
 
-app.use(
-  cors({
-    origin: ALLOWED_ORIGINS,
-    credentials: true,
-  }),
-);
-
+app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- RUTAS ---
 app.use("/api/auth", authRoutes);
 app.use("/api/stocks", stockRoutes);
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "Servidor funcionando correctamente",
-    timestamp: new Date(),
-  });
-});
+// --- CACHE DE PRECIOS EN TIEMPO REAL ---
+const currentPrices = {}; // Aquí guardamos el último precio recibido de cada moneda
 
-// --- LÓGICA DE WEBSOCKETS CON RECONEXIÓN (FINNHUB) ---
+// --- LÓGICA DE WEBSOCKETS (FINNHUB) ---
 let finnhubWs;
-const lastSavedPrices = {};
-let retryDelay = 5000;
 
 function connectFinnhub() {
-  console.log("🔄 Intentando conectar a Finnhub...");
-  
-  // Inicializamos la instancia
+  console.log("🔄 Conectando a Finnhub...");
   finnhubWs = new WebSocket(`wss://ws.finnhub.io?token=${process.env.FINNHUB_API_KEY}`);
 
-  // IMPORTANTE: Los eventos deben ir pegados a la instancia recién creada
   finnhubWs.on('open', async () => {
-    console.log("🔌 Conectado a Finnhub WebSocket");
-    retryDelay = 5000; // Resetear delay al conectar con éxito
-    
+    console.log("🔌 WebSocket de Finnhub Activo");
     try {
       const assets = await Asset.find({});
       assets.forEach(asset => {
         finnhubWs.send(JSON.stringify({ type: 'subscribe', symbol: asset.symbol }));
+        // Inicializamos el cache con el openPrice para evitar nulos
+        const symbol = asset.symbol.includes(':') ? asset.symbol.split(':')[1] : asset.symbol;
+        currentPrices[symbol] = asset.openPrice;
       });
-      console.log(`✅ Suscrito a ${assets.length} activos.`);
-    } catch (error) {
-      console.error("❌ Error en suscripción:", error);
-    }
+    } catch (error) { console.error("❌ Error en suscripción:", error); }
   });
 
-  finnhubWs.on('message', async (data) => {
+  finnhubWs.on('message', (data) => {
     try {
       const message = JSON.parse(data);
       if (message.type === 'trade') {
         const trades = message.data;
-        io.emit('market-data', trades);
+        io.emit('market-data', trades); // Envío inmediato al frontend para el parpadeo
 
-        for (const trade of trades) {
+        // Actualizamos el cache con el precio más reciente
+        trades.forEach(trade => {
           const symbol = trade.s.includes(':') ? trade.s.split(':')[1] : trade.s;
-          const now = Date.now();
-
-          if (!lastSavedPrices[symbol] || now - lastSavedPrices[symbol] > 300000) {
-            await History.create({
-              symbol: symbol,
-              price: trade.p,
-              timestamp: new Date(now)
-            });
-            lastSavedPrices[symbol] = now;
-            console.log(`💾 Historial persistido: ${symbol}`);
-          }
-        }
-      } else if (message.type === 'error') {
-        console.error("⚠️ Error de Finnhub:", message.msg);
+          currentPrices[symbol] = trade.p;
+        });
       }
-    } catch (err) {
-      console.error("❌ Error procesando mensaje:", err);
-    }
-  });
-
-  finnhubWs.on('error', (err) => {
-    console.error("❌ Error en WebSocket:", err.message);
-    if (err.message.includes('429')) {
-        retryDelay = Math.min(retryDelay * 2, 60000); 
-    }
+    } catch (err) { console.error("❌ Error procesando mensaje:", err); }
   });
 
   finnhubWs.on('close', () => {
-    console.log(`⚠️ Conexión cerrada. Reintentando en ${retryDelay / 1000}s...`);
-    setTimeout(connectFinnhub, retryDelay);
+    console.log("⚠️ Conexión cerrada. Reintentando...");
+    setTimeout(connectFinnhub, 5000);
   });
 }
 
-// Iniciar conexión
 connectFinnhub();
 
-// --- SOCKET.IO (CLIENTES FRONTEND) ---
-io.on("connection", async (socket) => {
+// --- TAREA PROGRAMADA: GUARDADO FORZADO CADA MINUTO ---
+// Esto garantiza que las 40 monedas tengan registro, haya trades o no.
+cron.schedule("* * * * *", async () => {
+  console.log("⏱️ Persistiendo minuto exacto para los 40 activos...");
   try {
-    const savedAssets = await Asset.find();
-    const cleanAssets = savedAssets.map((asset) => ({
-      ...asset._doc,
-      symbol: asset.symbol.includes(":")
-        ? asset.symbol.split(":")[1]
-        : asset.symbol,
-    }));
+    const assets = await Asset.find();
+    const now = new Date();
 
-    if (cleanAssets.length > 0) {
-      socket.emit("initial-prices", cleanAssets);
-    }
-  } catch (error) {
-    console.error("❌ Error al enviar precios iniciales:", error);
+    const historyPromises = assets.map(async (asset) => {
+      const symbol = asset.symbol.includes(':') ? asset.symbol.split(':')[1] : asset.symbol;
+      
+      // Si no hubo trades en el último minuto, usamos el último precio conocido del cache
+      const priceToSave = currentPrices[symbol] || asset.openPrice;
+
+      return History.create({
+        symbol: symbol,
+        price: priceToSave,
+        timestamp: now
+      });
+    });
+
+    await Promise.all(historyPromises);
+    console.log(`✅ Historial completado para ${assets.length} activos.`);
+  } catch (err) {
+    console.error("❌ Error en guardado de historial:", err);
   }
 });
 
-// --- CRON JOBS (Sincronización de Precios) ---
-
-// 1. Media noche UTC: Sincronizar precio de apertura diario
-cron.schedule(
-  "0 0 * * *",
-  async () => {
-    console.log("🕛 Media noche UTC: Actualizando precios de apertura...");
-    try {
-      const assets = await Asset.find();
-      for (const asset of assets) {
-        const lastPrice = await History.findOne({ symbol: asset.symbol }).sort({
-          timestamp: -1,
-        });
-        if (lastPrice) {
-          asset.openPrice = lastPrice.price;
-          asset.lastUpdated = new Date();
-          await asset.save();
-        }
+// --- CRON JOB: ACTUALIZACIÓN DE APERTURA (00:00 UTC) ---
+cron.schedule("0 0 * * *", async () => {
+  console.log("🕛 Media noche: Sincronizando precio de apertura con el registro de las 00:00...");
+  try {
+    const assets = await Asset.find();
+    for (const asset of assets) {
+      const cleanSymbol = asset.symbol.includes(':') ? asset.symbol.split(':')[1] : asset.symbol;
+      
+      // Buscamos el registro que el cron de arriba acaba de guardar exactamente a las 00:00
+      const openRecord = await History.findOne({ symbol: cleanSymbol }).sort({ timestamp: -1 });
+      
+      if (openRecord) {
+        asset.openPrice = openRecord.price;
+        asset.lastUpdated = new Date();
+        await asset.save();
       }
-      const updatedAssets = await Asset.find();
-      io.emit("initial-prices", updatedAssets);
-      console.log("✅ Precios de apertura sincronizados.");
-    } catch (err) {
-      console.error("❌ Error en cron diario:", err);
     }
-  },
-  { timezone: "UTC" },
-);
+    // Notificamos al frontend del nuevo precio base del día
+    const updatedAssets = await Asset.find();
+    io.emit("initial-prices", updatedAssets.map(a => ({
+      ...a._doc,
+      symbol: a.symbol.includes(':') ? a.symbol.split(':')[1] : a.symbol
+    })));
+    console.log("✅ openPrice reescrito para el nuevo ciclo de 24h.");
+  } catch (err) {
+    console.error("❌ Error en sincronización diaria:", err);
+  }
+}, { timezone: "UTC" });
 
-// 2. Apertura Wall Street (Acciones)
-cron.schedule(
-  "30 9 * * 1-5",
-  async () => {
-    console.log(
-      "🔔 Apertura de Wall Street: Reseteando precios de Acciones...",
-    );
-    try {
-      const stocks = await Asset.find({ type: "stock" });
-      for (const stock of stocks) {
-        const lastTrade = await History.findOne({ symbol: stock.symbol }).sort({
-          timestamp: -1,
-        });
-        if (lastTrade) {
-          stock.openPrice = lastTrade.price;
-          await stock.save();
-        }
-      }
-      const updatedAssets = await Asset.find();
-      io.emit("initial-prices", updatedAssets);
-    } catch (err) {
-      console.error("❌ Error en cron de Wall Street:", err);
-    }
-  },
-  { timezone: "America/New_York" },
-);
-
-// --- CONEXIÓN BASE DE DATOS Y ARRANQUE ---
-mongoose
-  .connect(process.env.MONGODB_URI)
+// --- CONEXIÓN Y ARRANQUE ---
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log("🚀 Backend conectado a MongoDB Atlas"))
   .catch((err) => console.error("❌ Error de conexión MongoDB:", err));
 
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+httpServer.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 export default app;
