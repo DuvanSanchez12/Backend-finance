@@ -23,20 +23,20 @@ export const getStockQuote = async (req, res) => {
   }
 };
 
-
-
 export const getHistory = async (req, res) => {
   try {
     const { symbol } = req.params;
-    // Buscamos los registros del último año agrupados por día
-    const history = await History.aggregate([
-      { $match: { symbol: symbol.toUpperCase() } },
-      { $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } },
-          price: { $last: "$price" } // Tomamos el último precio registrado ese día
-      }},
-      { $sort: { "_id": 1 } }
-    ]);
+    // Buscamos los registros de las últimas 24h directamente
+    const history = await History.find({ 
+      symbol: symbol.toUpperCase() 
+    })
+    .sort({ timestamp: 1 }) // Orden cronológico para la gráfica
+    .select('price timestamp -_id'); // Solo lo necesario para que pese menos
+
+    if (!history.length) {
+      return res.status(404).json({ message: "No hay datos para este símbolo" });
+    }
+
     res.status(200).json(history);
   } catch (error) {
     res.status(500).json({ message: "Error al obtener historial", error: error.message });

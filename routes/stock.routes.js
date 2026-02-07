@@ -8,5 +8,6 @@ const router = express.Router();
 router.get('/quote/:symbol', getStockQuote);
 router.post('/buy', protect, buyStock);
 router.get('/portfolio', protect, getPortfolio);
+router.get('/history/:symbol', getHistory);
 
 export default router;
