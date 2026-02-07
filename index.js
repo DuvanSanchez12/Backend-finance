@@ -141,21 +141,37 @@ cron.schedule("0 0 * * *", async () => {
   }
 }, { timezone: "UTC" });
 io.on("connection", async (socket) => {
+  console.log("👤 Nuevo cliente conectado:", socket.id);
+  
   try {
+    // 1. Buscamos todos los activos en la colección 'assets'
     const savedAssets = await Asset.find();
+    
+    // 2. Mapeamos los datos para enviarlos limpios al frontend
     const cleanAssets = savedAssets.map((asset) => ({
-      ...asset._doc,
+      // Extraemos todas las propiedades del documento de Mongo
+      ...asset._doc, 
+      // Limpiamos el símbolo (BINANCE:BTCUSDT -> BTCUSDT) para que coincida con el hook
       symbol: asset.symbol.includes(":")
         ? asset.symbol.split(":")[1]
         : asset.symbol,
+      // Aseguramos que el openPrice vaya en el primer nivel del objeto
+      openPrice: asset.openPrice,
+      name: asset.name
     }));
 
+    // 3. Emitimos solo a este socket recién conectado
     if (cleanAssets.length > 0) {
       socket.emit("initial-prices", cleanAssets);
+      console.log(`📊 Enviados ${cleanAssets.length} precios de apertura a cliente ${socket.id}`);
     }
   } catch (error) {
     console.error("❌ Error al enviar precios iniciales:", error);
   }
+
+  socket.on("disconnect", () => {
+    console.log("👤 Cliente desconectado");
+  });
 });
 // --- CONEXIÓN Y ARRANQUE ---
 mongoose.connect(process.env.MONGODB_URI)
