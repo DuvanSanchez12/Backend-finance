@@ -164,6 +164,10 @@ const cleanAssets = savedAssets.map((asset) => ({
   } catch (error) {
     console.error("❌ Error al enviar precios iniciales:", error);
   }
+    socket.on("send-chat-message", (data) => {
+    // Retransmitimos el mensaje a todos, incluyéndote
+    io.emit("chat-message", data);
+  });
 
   socket.on("disconnect", () => {
     console.log("👤 Cliente desconectado");
